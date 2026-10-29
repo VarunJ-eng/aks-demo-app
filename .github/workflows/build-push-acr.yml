@@ -27,6 +27,7 @@ jobs:
           SUBSCRIPTION_ID: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
           ACR_NAME: ${{ secrets.ACR_NAME }}
           ACR_LOGIN_SERVER: ${{ secrets.ACR_LOGIN_SERVER }}
+        shell: bash
         run: |
           test "$CLIENT_ID" = "a907f788-008a-4d13-b65f-5e9301871301" \
             || { echo "ERROR: Client ID mismatch"; exit 1; }
@@ -45,8 +46,7 @@ jobs:
 
           echo "All Azure secrets validated successfully."
 
-      # Step 3: Authenticate to Azure using GitHub OIDC
-      # Intentionally omit subscription-id for this diagnostic run
+      # Step 3: Authenticate using GitHub OIDC
       - name: Login to Azure
         uses: azure/login@v3
         with:
@@ -54,41 +54,46 @@ jobs:
           tenant-id: ${{ secrets.AZURE_TENANT_ID }}
           allow-no-subscriptions: true
 
-      # Step 4: Inspect Azure CLI context and subscription visibility
-      - name: Inspect Azure CLI context
-        run: |
-          echo "Azure CLI version:"
-          az version
-
-          echo "Current Azure account:"
-          az account show \
-            --query "{name:name, subscriptionId:id, tenantId:tenantId}" \
-            -o json
-
-          echo "Subscriptions visible to GitHub Actions:"
-          az account list --all \
-            --query "[].{name:name,id:id,tenantId:tenantId,state:state}" \
-            -o table
-
-      # Step 5: Select the target subscription
-      - name: Select Azure subscription
+      # Step 4: Refresh and select the Azure subscription
+      - name: Refresh and select Azure subscription
         env:
           SUBSCRIPTION_ID: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+        shell: bash
         run: |
-          az account set --subscription "$SUBSCRIPTION_ID"
+          for attempt in 1 2 3 4 5; do
+            echo "Subscription discovery attempt $attempt of 5"
 
-          az account show \
-            --query "{name:name,subscriptionId:id,tenantId:tenantId}" \
-            -o json
+            az account list --refresh --all \
+              --query "[].{name:name,id:id,tenantId:tenantId,state:state}" \
+              -o table || true
 
-      # Step 6: Login to Azure Container Registry
+            if az account set --subscription "$SUBSCRIPTION_ID"; then
+              echo "Subscription selected successfully."
+
+              az account show \
+                --query "{name:name,subscriptionId:id,tenantId:tenantId}" \
+                -o json
+
+              exit 0
+            fi
+
+            if [ "$attempt" -lt 5 ]; then
+              echo "Subscription not available yet. Retrying in 5 seconds..."
+              sleep 5
+            fi
+          done
+
+          echo "ERROR: Unable to select the Azure subscription after 5 attempts."
+          exit 1
+
+      # Step 5: Login to Azure Container Registry
       - name: Login to ACR
         env:
           ACR_NAME: ${{ secrets.ACR_NAME }}
         run: |
           az acr login --name "$ACR_NAME"
 
-      # Step 7: Build Docker image
+      # Step 6: Build the Docker image
       - name: Build Docker image
         env:
           ACR_LOGIN_SERVER: ${{ secrets.ACR_LOGIN_SERVER }}
@@ -97,7 +102,7 @@ jobs:
           echo "Building image: $IMAGE"
           docker build -t "$IMAGE" .
 
-      # Step 8: Push Docker image to ACR
+      # Step 7: Push the Docker image to ACR
       - name: Push Docker image to ACR
         env:
           ACR_LOGIN_SERVER: ${{ secrets.ACR_LOGIN_SERVER }}
@@ -106,7 +111,7 @@ jobs:
           echo "Pushing image: $IMAGE"
           docker push "$IMAGE"
 
-      # Step 9: Display published image
+      # Step 8: Display the published image
       - name: Show published image
         env:
           ACR_LOGIN_SERVER: ${{ secrets.ACR_LOGIN_SERVER }}
