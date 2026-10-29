@@ -45,41 +45,50 @@ jobs:
 
           echo "All Azure secrets validated successfully."
 
-      # Step 3: Login to Azure using GitHub OIDC
+      # Step 3: Authenticate to Azure using GitHub OIDC
+      # Intentionally omit subscription-id for this diagnostic run
       - name: Login to Azure
         uses: azure/login@v3
         with:
           client-id: ${{ secrets.AZURE_CLIENT_ID }}
           tenant-id: ${{ secrets.AZURE_TENANT_ID }}
-          subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
           allow-no-subscriptions: true
 
-      # Step 4: Verify and select the Azure subscription
-      - name: Verify Azure subscription
-        env:
-          SUBSCRIPTION_ID: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+      # Step 4: Inspect Azure CLI context and subscription visibility
+      - name: Inspect Azure CLI context
         run: |
-          echo "Available subscriptions:"
+          echo "Azure CLI version:"
+          az version
+
+          echo "Current Azure account:"
+          az account show \
+            --query "{name:name, subscriptionId:id, tenantId:tenantId}" \
+            -o json
+
+          echo "Subscriptions visible to GitHub Actions:"
           az account list --all \
             --query "[].{name:name,id:id,tenantId:tenantId,state:state}" \
             -o table
 
-          echo "Selecting target subscription..."
+      # Step 5: Select the target subscription
+      - name: Select Azure subscription
+        env:
+          SUBSCRIPTION_ID: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+        run: |
           az account set --subscription "$SUBSCRIPTION_ID"
 
-          echo "Selected Azure account:"
           az account show \
             --query "{name:name,subscriptionId:id,tenantId:tenantId}" \
             -o json
 
-      # Step 5: Login to Azure Container Registry
+      # Step 6: Login to Azure Container Registry
       - name: Login to ACR
         env:
           ACR_NAME: ${{ secrets.ACR_NAME }}
         run: |
           az acr login --name "$ACR_NAME"
 
-      # Step 6: Build the Docker image
+      # Step 7: Build Docker image
       - name: Build Docker image
         env:
           ACR_LOGIN_SERVER: ${{ secrets.ACR_LOGIN_SERVER }}
@@ -88,8 +97,8 @@ jobs:
           echo "Building image: $IMAGE"
           docker build -t "$IMAGE" .
 
-      # Step 7: Push the Docker image to ACR
-      - name: Push image to ACR
+      # Step 8: Push Docker image to ACR
+      - name: Push Docker image to ACR
         env:
           ACR_LOGIN_SERVER: ${{ secrets.ACR_LOGIN_SERVER }}
         run: |
@@ -97,7 +106,7 @@ jobs:
           echo "Pushing image: $IMAGE"
           docker push "$IMAGE"
 
-      # Step 8: Display published image
+      # Step 9: Display published image
       - name: Show published image
         env:
           ACR_LOGIN_SERVER: ${{ secrets.ACR_LOGIN_SERVER }}
