@@ -1,3 +1,22 @@
+
+      - name: Validate Azure secrets
+        env:
+          CLIENT_ID: ${{ secrets.AZURE_CLIENT_ID }}
+          TENANT_ID: ${{ secrets.AZURE_TENANT_ID }}
+          SUBSCRIPTION_ID: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+        run: |
+          test "$CLIENT_ID" = "a907f788-008a-4d13-b65f-5e9301871301" \
+            && echo "Client ID matches" \
+            || { echo "ERROR: Client ID mismatch"; exit 1; }
+
+          test "$TENANT_ID" = "b67ad627-6134-4210-8d55-1fba47bf7461" \
+            && echo "Tenant ID matches" \
+            || { echo "ERROR: Tenant ID mismatch"; exit 1; }
+
+          test "$SUBSCRIPTION_ID" = "4d219645-c0cb-40bd-bedf-cbbda7f23a01" \
+            && echo "Subscription ID matches" \
+            || { echo "ERROR: Subscription ID mismatch"; exit 1; }
+
 name: Build and Push Image to ACR
 
 on:
