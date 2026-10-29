@@ -1,4 +1,5 @@
-name: Build and Push Image to ACR
+
+name: Build and Push Docker Image to ACR
 
 on:
   push:
@@ -15,106 +16,92 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
-      # Step 1: Checkout source code
-      - name: Checkout GitHub code
+      # 1. Download repository code
+      - name: Checkout repository
         uses: actions/checkout@v4
 
-      # Step 2: Validate Azure secrets
-      - name: Validate Azure secrets
+      # 2. Validate required GitHub secrets
+      - name: Validate Azure configuration
         env:
-          CLIENT_ID: ${{ secrets.AZURE_CLIENT_ID }}
-          TENANT_ID: ${{ secrets.AZURE_TENANT_ID }}
-          SUBSCRIPTION_ID: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+          AZURE_CLIENT_ID: ${{ secrets.AZURE_CLIENT_ID }}
+          AZURE_TENANT_ID: ${{ secrets.AZURE_TENANT_ID }}
+          AZURE_SUBSCRIPTION_ID: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
           ACR_NAME: ${{ secrets.ACR_NAME }}
           ACR_LOGIN_SERVER: ${{ secrets.ACR_LOGIN_SERVER }}
         shell: bash
         run: |
-          test "$CLIENT_ID" = "a907f788-008a-4d13-b65f-5e9301871301" \
-            || { echo "ERROR: Client ID mismatch"; exit 1; }
+          set -e
 
-          test "$TENANT_ID" = "b67ad627-6134-4210-8d55-1fba47bf7461" \
-            || { echo "ERROR: Tenant ID mismatch"; exit 1; }
-
-          test "$SUBSCRIPTION_ID" = "4d219645-c0cb-40bd-bedf-cbbda7f23a01" \
-            || { echo "ERROR: Subscription ID mismatch"; exit 1; }
-
-          test "$ACR_NAME" = "varunaks1793257564" \
-            || { echo "ERROR: ACR name mismatch"; exit 1; }
-
-          test "$ACR_LOGIN_SERVER" = "varunaks1793257564.azurecr.io" \
-            || { echo "ERROR: ACR login server mismatch"; exit 1; }
-
-          echo "All Azure secrets validated successfully."
-
-      # Step 3: Authenticate using GitHub OIDC
-      - name: Login to Azure
-        uses: azure/login@v3
-        with:
-          client-id: ${{ secrets.AZURE_CLIENT_ID }}
-          tenant-id: ${{ secrets.AZURE_TENANT_ID }}
-          allow-no-subscriptions: true
-
-      # Step 4: Refresh and select the Azure subscription
-      - name: Refresh and select Azure subscription
-        env:
-          SUBSCRIPTION_ID: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
-        shell: bash
-        run: |
-          for attempt in 1 2 3 4 5; do
-            echo "Subscription discovery attempt $attempt of 5"
-
-            az account list --refresh --all \
-              --query "[].{name:name,id:id,tenantId:tenantId,state:state}" \
-              -o table || true
-
-            if az account set --subscription "$SUBSCRIPTION_ID"; then
-              echo "Subscription selected successfully."
-
-              az account show \
-                --query "{name:name,subscriptionId:id,tenantId:tenantId}" \
-                -o json
-
-              exit 0
-            fi
-
-            if [ "$attempt" -lt 5 ]; then
-              echo "Subscription not available yet. Retrying in 5 seconds..."
-              sleep 5
+          for name in \
+            AZURE_CLIENT_ID \
+            AZURE_TENANT_ID \
+            AZURE_SUBSCRIPTION_ID \
+            ACR_NAME \
+            ACR_LOGIN_SERVER
+          do
+            if [ -z "${!name}" ]; then
+              echo "ERROR: $name is missing."
+              exit 1
             fi
           done
 
-          echo "ERROR: Unable to select the Azure subscription after 5 attempts."
-          exit 1
+          echo "Required configuration values are present."
 
-      # Step 5: Login to Azure Container Registry
+      # 3. Authenticate to Azure using GitHub OIDC
+      - name: Login to Azure
+        uses: azure/login@v2
+        with:
+          client-id: ${{ secrets.AZURE_CLIENT_ID }}
+          tenant-id: ${{ secrets.AZURE_TENANT_ID }}
+          subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+
+      # 4. Confirm the authenticated subscription
+      - name: Verify Azure subscription
+        shell: bash
+        run: |
+          set -e
+
+          az account show \
+            --query "{name:name,subscriptionId:id,tenantId:tenantId}" \
+            --output json
+
+      # 5. Authenticate Docker to Azure Container Registry
       - name: Login to ACR
         env:
           ACR_NAME: ${{ secrets.ACR_NAME }}
+        shell: bash
         run: |
+          set -e
           az acr login --name "$ACR_NAME"
 
-      # Step 6: Build the Docker image
+      # 6. Build the Docker image
       - name: Build Docker image
         env:
           ACR_LOGIN_SERVER: ${{ secrets.ACR_LOGIN_SERVER }}
+          IMAGE_TAG: ${{ github.sha }}
+        shell: bash
         run: |
-          IMAGE="${ACR_LOGIN_SERVER}/aks-demo-app:${GITHUB_SHA::7}"
+          set -e
+
+          SHORT_SHA="${IMAGE_TAG:0:7}"
+          IMAGE="$ACR_LOGIN_SERVER/aks-demo-app:$SHORT_SHA"
+
           echo "Building image: $IMAGE"
           docker build -t "$IMAGE" .
 
-      # Step 7: Push the Docker image to ACR
-      - name: Push Docker image to ACR
-        env:
-          ACR_LOGIN_SERVER: ${{ secrets.ACR_LOGIN_SERVER }}
+          echo "IMAGE=$IMAGE" >> "$GITHUB_ENV"
+
+      # 7. Push the image to ACR
+      - name: Push Docker image
+        shell: bash
         run: |
-          IMAGE="${ACR_LOGIN_SERVER}/aks-demo-app:${GITHUB_SHA::7}"
+          set -e
+
           echo "Pushing image: $IMAGE"
           docker push "$IMAGE"
 
-      # Step 8: Display the published image
+      # 8. Display the pushed image
       - name: Show published image
-        env:
-          ACR_LOGIN_SERVER: ${{ secrets.ACR_LOGIN_SERVER }}
         run: |
-          echo "Published image:"
-          echo "${ACR_LOGIN_SERVER}/aks-demo-app:${GITHUB_SHA::7}"
+          echo "Successfully pushed:"
+          echo "$IMAGE"
