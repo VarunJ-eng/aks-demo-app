@@ -45,29 +45,12 @@ jobs:
 
       - name: Check visible subscriptions
         run: |
+          echo "Current Azure account:"
+          az account show \
+            --query "{tenantId:tenantId, subscriptionId:id, name:name}" \
+            -o json || true
+
+          echo "Subscriptions visible to GitHub Actions:"
           az account list --all \
             --query "[].{name:name, id:id, tenantId:tenantId, state:state}" \
             -o table
-
-      - name: Select Azure subscription
-        run: |
-          az account set \
-            --subscription "4d219645-c0cb-40bd-bedf-cbbda7f23a01"
-
-          az account show \
-            --query "{name:name, subscriptionId:id, tenantId:tenantId}" \
-            -o table
-
-      - name: Login to ACR
-        run: |
-          az acr login --name "${{ secrets.ACR_NAME }}"
-
-      - name: Build Docker image
-        run: |
-          IMAGE="${{ secrets.ACR_LOGIN_SERVER }}/aks-demo-app:${GITHUB_SHA::7}"
-          docker build -t "$IMAGE" .
-
-      - name: Push image to ACR
-        run: |
-          IMAGE="${{ secrets.ACR_LOGIN_SERVER }}/aks-demo-app:${GITHUB_SHA::7}"
-          docker push "$IMAGE"
