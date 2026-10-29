@@ -1,4 +1,3 @@
-
 name: Build and Push Docker Image to ACR
 
 on:
@@ -45,23 +44,51 @@ jobs:
 
           echo "All required secrets are configured."
 
-      # Workaround for the Azure CLI subscription-discovery issue.
-      - name: Login to Azure
-        uses: azure/login@v2
-        with:
-          client-id: ${{ secrets.AZURE_CLIENT_ID }}
-          tenant-id: ${{ secrets.AZURE_TENANT_ID }}
-          subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
-          allow-no-subscriptions: true
-
-      - name: Verify Azure subscription
+      # Authenticate using GitHub's OIDC token directly.
+      - name: Login to Azure with retry
+        env:
+          AZURE_CLIENT_ID: ${{ secrets.AZURE_CLIENT_ID }}
+          AZURE_TENANT_ID: ${{ secrets.AZURE_TENANT_ID }}
+          AZURE_SUBSCRIPTION_ID: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
         shell: bash
         run: |
           set -e
-          az account show \
-            --query "{name:name,subscriptionId:id,tenantId:tenantId}" \
-            --output json
 
+          for attempt in 1 2 3; do
+            echo "Azure login attempt $attempt of 3"
+
+            az account clear
+
+            if az login \
+              --service-principal \
+              --username "$AZURE_CLIENT_ID" \
+              --tenant "$AZURE_TENANT_ID" \
+              --federated-token "$(curl -sSf \
+                -H "Authorization: bearer $ACTIONS_ID_TOKEN_REQUEST_TOKEN" \
+                "${ACTIONS_ID_TOKEN_REQUEST_URL}&audience=api%3A%2F%2FAzureADTokenExchange" \
+                | python3 -c 'import json,sys; print(json.load(sys.stdin)["value"])')" \
+              --output none; then
+
+              if az account set --subscription "$AZURE_SUBSCRIPTION_ID"; then
+                az account show \
+                  --query "{name:name,subscriptionId:id,tenantId:tenantId}" \
+                  --output json
+
+                exit 0
+              fi
+            fi
+
+            echo "Login or subscription selection failed."
+
+            if [ "$attempt" -lt 3 ]; then
+              sleep 10
+            fi
+          done
+
+          echo "ERROR: Azure login failed after 3 attempts."
+          exit 1
+
+      # Authenticate Docker to Azure Container Registry.
       - name: Login to ACR
         env:
           ACR_NAME: ${{ secrets.ACR_NAME }}
@@ -70,6 +97,7 @@ jobs:
           set -e
           az acr login --name "$ACR_NAME"
 
+      # Build the image.
       - name: Build Docker image
         env:
           ACR_LOGIN_SERVER: ${{ secrets.ACR_LOGIN_SERVER }}
@@ -80,12 +108,22 @@ jobs:
           IMAGE_TAG="${GITHUB_SHA:0:7}"
           IMAGE="$ACR_LOGIN_SERVER/aks-demo-app:$IMAGE_TAG"
 
+          echo "Building image: $IMAGE"
           docker build -t "$IMAGE" .
+
           echo "IMAGE=$IMAGE" >> "$GITHUB_ENV"
 
+      # Push the image.
       - name: Push Docker image
         shell: bash
         run: |
           set -e
+
+          echo "Pushing image: $IMAGE"
           docker push "$IMAGE"
+
           echo "Successfully pushed: $IMAGE"
+
+      # Display the published image reference.
+      - name: Show published image
+        run: echo "Published image: $IMAGE"
