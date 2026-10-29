@@ -45,49 +45,23 @@ jobs:
 
           echo "All required secrets are configured."
 
-      # Login without requiring subscription discovery to succeed.
+      # Workaround for the Azure CLI subscription-discovery issue.
       - name: Login to Azure
         uses: azure/login@v2
         with:
           client-id: ${{ secrets.AZURE_CLIENT_ID }}
           tenant-id: ${{ secrets.AZURE_TENANT_ID }}
+          subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
           allow-no-subscriptions: true
 
-      # Retry subscription discovery and selection.
-      - name: Discover and select Azure subscription
-        env:
-          AZURE_SUBSCRIPTION_ID: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+      - name: Verify Azure subscription
         shell: bash
         run: |
           set -e
+          az account show \
+            --query "{name:name,subscriptionId:id,tenantId:tenantId}" \
+            --output json
 
-          for attempt in 1 2 3; do
-            echo "Subscription discovery attempt $attempt of 3"
-
-            az account list --all \
-              --query "[].{name:name,id:id,tenantId:tenantId,state:state}" \
-              --output table || true
-
-            if az account set --subscription "$AZURE_SUBSCRIPTION_ID"; then
-              echo "Azure subscription selected."
-
-              az account show \
-                --query "{name:name,subscriptionId:id,tenantId:tenantId}" \
-                --output json
-
-              exit 0
-            fi
-
-            if [ "$attempt" -lt 3 ]; then
-              sleep 5
-            fi
-          done
-
-          echo "ERROR: The service principal cannot select the subscription."
-          echo "Check subscription visibility for the authenticated Azure identity."
-          exit 1
-
-      # Authenticate Docker to ACR.
       - name: Login to ACR
         env:
           ACR_NAME: ${{ secrets.ACR_NAME }}
@@ -96,7 +70,6 @@ jobs:
           set -e
           az acr login --name "$ACR_NAME"
 
-      # Build the Docker image.
       - name: Build Docker image
         env:
           ACR_LOGIN_SERVER: ${{ secrets.ACR_LOGIN_SERVER }}
@@ -110,7 +83,6 @@ jobs:
           docker build -t "$IMAGE" .
           echo "IMAGE=$IMAGE" >> "$GITHUB_ENV"
 
-      # Push the image to ACR.
       - name: Push Docker image
         shell: bash
         run: |
