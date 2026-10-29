@@ -19,7 +19,7 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v4
 
-      # 2. Validate GitHub repository secrets
+      # 2. Validate configuration
       - name: Validate Azure configuration
         env:
           AZURE_CLIENT_ID: ${{ secrets.AZURE_CLIENT_ID }}
@@ -46,40 +46,43 @@ jobs:
 
           echo "All required secrets are configured."
 
-      # 3. Verify OIDC token exchange and Azure subscription access
-      - name: Diagnose Azure subscription access
+      # 3. Authenticate to ACR directly using GitHub OIDC
+      #    This bypasses Azure CLI subscription discovery.
+      - name: Authenticate to ACR using OIDC
         env:
           AZURE_CLIENT_ID: ${{ secrets.AZURE_CLIENT_ID }}
           AZURE_TENANT_ID: ${{ secrets.AZURE_TENANT_ID }}
           AZURE_SUBSCRIPTION_ID: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+          ACR_LOGIN_SERVER: ${{ secrets.ACR_LOGIN_SERVER }}
         shell: bash
         run: |
-          set -e
+          set -euo pipefail
 
           echo "Requesting GitHub OIDC token..."
 
           OIDC_TOKEN="$(curl -fsS \
             -H "Authorization: bearer $ACTIONS_ID_TOKEN_REQUEST_TOKEN" \
             "${ACTIONS_ID_TOKEN_REQUEST_URL}&audience=api%3A%2F%2FAzureADTokenExchange" \
-            | python3 -c 'import json,sys; print(json.load(sys.stdin)["value"])')"
+            | python3 -c \
+              'import json,sys; print(json.load(sys.stdin)["value"])')"
 
-          echo "Exchanging OIDC token for Azure Resource Manager access..."
+          echo "Exchanging OIDC token for Azure access token..."
 
           TOKEN_STATUS="$(curl -sS \
             -o /tmp/azure-token-response.json \
             -w '%{http_code}' \
             -X POST \
-            "https://login.microsoftonline.com/$AZURE_TENANT_ID/oauth2/v2.0/token" \
-            --data-urlencode "client_id=$AZURE_CLIENT_ID" \
+            "https://login.microsoftonline.com/${AZURE_TENANT_ID}/oauth2/v2.0/token" \
+            --data-urlencode "client_id=${AZURE_CLIENT_ID}" \
             --data-urlencode "scope=https://management.azure.com/.default" \
             --data-urlencode "grant_type=client_credentials" \
             --data-urlencode "client_assertion_type=urn:ietf:params:oauth:client-assertion-type:jwt-bearer" \
-            --data-urlencode "client_assertion=$OIDC_TOKEN")"
+            --data-urlencode "client_assertion=${OIDC_TOKEN}")"
 
           unset OIDC_TOKEN
 
           if [ "$TOKEN_STATUS" != "200" ]; then
-            echo "Azure token exchange failed. HTTP status: $TOKEN_STATUS"
+            echo "Azure token exchange failed: HTTP $TOKEN_STATUS"
 
             python3 -c \
               'import json; d=json.load(open("/tmp/azure-token-response.json")); print(json.dumps({"error":d.get("error"),"error_description":d.get("error_description")},indent=2))'
@@ -90,91 +93,95 @@ jobs:
           ARM_TOKEN="$(python3 -c \
             'import json; print(json.load(open("/tmp/azure-token-response.json"))["access_token"])')"
 
-          echo "Checking subscription directly through Azure Resource Manager..."
+          echo "Checking Azure subscription access..."
 
-          HTTP_STATUS="$(curl -sS \
+          SUBSCRIPTION_STATUS="$(curl -sS \
             -o /tmp/subscription-response.json \
             -w '%{http_code}' \
-            -H "Authorization: Bearer $ARM_TOKEN" \
-            "https://management.azure.com/subscriptions/$AZURE_SUBSCRIPTION_ID?api-version=2022-12-01")"
+            -H "Authorization: Bearer ${ARM_TOKEN}" \
+            "https://management.azure.com/subscriptions/${AZURE_SUBSCRIPTION_ID}?api-version=2022-12-01")"
 
-          unset ARM_TOKEN
+          if [ "$SUBSCRIPTION_STATUS" != "200" ]; then
+            echo "Subscription check failed: HTTP $SUBSCRIPTION_STATUS"
 
-          echo "Subscription API HTTP status: $HTTP_STATUS"
+            python3 -c \
+              'import json; d=json.load(open("/tmp/subscription-response.json")); print(json.dumps(d.get("error",d),indent=2))'
 
-          python3 -c \
-            'import json; d=json.load(open("/tmp/subscription-response.json")); print(json.dumps({"subscriptionId":d.get("subscriptionId"),"displayName":d.get("displayName"),"state":d.get("state"),"error":d.get("error")},indent=2))'
-
-          if [ "$HTTP_STATUS" != "200" ]; then
-            echo "Subscription access check failed."
+            unset ARM_TOKEN
             exit 1
           fi
 
-          echo "Subscription API check succeeded."
+          echo "Azure subscription access confirmed."
 
-      # 4. Login to Azure using GitHub OIDC
-      - name: Login to Azure
-        uses: azure/login@v3
-        with:
-          client-id: ${{ secrets.AZURE_CLIENT_ID }}
-          tenant-id: ${{ secrets.AZURE_TENANT_ID }}
-          subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
-          allow-no-subscriptions: true
+          echo "Exchanging Azure token for an ACR refresh token..."
 
-      # 5. Verify Azure subscription context
-      - name: Verify Azure subscription
-        env:
-          AZURE_SUBSCRIPTION_ID: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
-        shell: bash
-        run: |
-          set -e
+          ACR_STATUS="$(curl -sS \
+            -o /tmp/acr-token-response.json \
+            -w '%{http_code}' \
+            -X POST \
+            "https://${ACR_LOGIN_SERVER}/oauth2/exchange" \
+            --data-urlencode "grant_type=access_token" \
+            --data-urlencode "service=${ACR_LOGIN_SERVER}" \
+            --data-urlencode "tenant=${AZURE_TENANT_ID}" \
+            --data-urlencode "access_token=${ARM_TOKEN}")"
 
-          az account show \
-            --subscription "$AZURE_SUBSCRIPTION_ID" \
-            --query '{name:name, subscriptionId:id, tenantId:tenantId, state:state}' \
-            --output json
+          unset ARM_TOKEN
 
-      # 6. Login to Azure Container Registry
-      - name: Login to ACR
-        env:
-          ACR_NAME: ${{ secrets.ACR_NAME }}
-        shell: bash
-        run: |
-          set -e
+          if [ "$ACR_STATUS" != "200" ]; then
+            echo "ACR token exchange failed: HTTP $ACR_STATUS"
 
-          az acr login --name "$ACR_NAME"
+            python3 -c \
+              'import json; d=json.load(open("/tmp/acr-token-response.json")); print(json.dumps({"errors":d.get("errors"),"error":d.get("error"),"message":d.get("message")},indent=2))'
 
-      # 7. Build Docker image
+            exit 1
+          fi
+
+          ACR_TOKEN="$(python3 -c \
+            'import json; print(json.load(open("/tmp/acr-token-response.json"))["refresh_token"])')"
+
+          echo "::add-mask::${ACR_TOKEN}"
+
+          echo "Logging Docker into ACR..."
+
+          printf '%s' "$ACR_TOKEN" | docker login "$ACR_LOGIN_SERVER" \
+            --username 00000000-0000-0000-0000-000000000000 \
+            --password-stdin
+
+          unset ACR_TOKEN
+
+          echo "ACR authentication succeeded."
+
+      # 4. Build Docker image
       - name: Build Docker image
         env:
           ACR_LOGIN_SERVER: ${{ secrets.ACR_LOGIN_SERVER }}
         shell: bash
         run: |
-          set -e
+          set -euo pipefail
 
           IMAGE_TAG="${GITHUB_SHA:0:7}"
-          IMAGE="$ACR_LOGIN_SERVER/aks-demo-app:$IMAGE_TAG"
+          IMAGE="${ACR_LOGIN_SERVER}/aks-demo-app:${IMAGE_TAG}"
 
-          echo "Building image: $IMAGE"
+          echo "Building image: ${IMAGE}"
 
           docker build -t "$IMAGE" .
 
           echo "IMAGE=$IMAGE" >> "$GITHUB_ENV"
 
-      # 8. Push Docker image to ACR
+      # 5. Push image to ACR
       - name: Push Docker image
         shell: bash
         run: |
-          set -e
+          set -euo pipefail
 
-          echo "Pushing image: $IMAGE"
+          echo "Pushing image: ${IMAGE}"
 
           docker push "$IMAGE"
 
-          echo "Successfully pushed: $IMAGE"
+          echo "Successfully pushed: ${IMAGE}"
 
-      # 9. Display published image
+      # 6. Display published image
       - name: Show published image
         shell: bash
         run: |
-          echo "Published image: $IMAGE"
+          echo "Published image: ${IMAGE}"
