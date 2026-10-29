@@ -24,16 +24,24 @@ jobs:
           client-id: ${{ secrets.AZURE_CLIENT_ID }}
           tenant-id: ${{ secrets.AZURE_TENANT_ID }}
           subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+          allow-no-subscriptions: true
+
+      - name: Verify Azure account
+        run: |
+          az account show \
+            --query "{name:name, subscriptionId:id, tenantId:tenantId}" \
+            -o table
 
       - name: Login to ACR
-        run: az acr login --name "${{ secrets.ACR_NAME }}"
+        run: |
+          az acr login --name "${{ secrets.ACR_NAME }}"
 
       - name: Build Docker image
         run: |
-          docker build \
-            -t "${{ secrets.ACR_LOGIN_SERVER }}/aks-demo-app:${GITHUB_SHA::7}" .
+          IMAGE="${{ secrets.ACR_LOGIN_SERVER }}/aks-demo-app:${GITHUB_SHA::7}"
+          docker build -t "$IMAGE" .
 
       - name: Push image to ACR
         run: |
-          docker push \
-            "${{ secrets.ACR_LOGIN_SERVER }}/aks-demo-app:${GITHUB_SHA::7}"
+          IMAGE="${{ secrets.ACR_LOGIN_SERVER }}/aks-demo-app:${GITHUB_SHA::7}"
+          docker push "$IMAGE"
