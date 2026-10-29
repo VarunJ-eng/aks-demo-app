@@ -1,3 +1,4 @@
+
 name: Build and Push Docker Image to ACR
 
 on:
@@ -44,8 +45,8 @@ jobs:
 
           echo "All required secrets are configured."
 
-      # Authenticate using GitHub's OIDC token directly.
-      - name: Login to Azure with retry
+      # Authenticate with GitHub OIDC and diagnose subscription access.
+      - name: Diagnose Azure subscription access
         env:
           AZURE_CLIENT_ID: ${{ secrets.AZURE_CLIENT_ID }}
           AZURE_TENANT_ID: ${{ secrets.AZURE_TENANT_ID }}
@@ -54,39 +55,47 @@ jobs:
         run: |
           set -e
 
-          for attempt in 1 2 3; do
-            echo "Azure login attempt $attempt of 3"
+          echo "Authenticating with GitHub OIDC..."
 
-            az account clear
+          TOKEN="$(curl -fsS \
+            -H "Authorization: bearer $ACTIONS_ID_TOKEN_REQUEST_TOKEN" \
+            "${ACTIONS_ID_TOKEN_REQUEST_URL}&audience=api%3A%2F%2FAzureADTokenExchange" \
+            | python3 -c 'import json,sys; print(json.load(sys.stdin)["value"])')"
 
-            if az login \
-              --service-principal \
-              --username "$AZURE_CLIENT_ID" \
-              --tenant "$AZURE_TENANT_ID" \
-              --federated-token "$(curl -sSf \
-                -H "Authorization: bearer $ACTIONS_ID_TOKEN_REQUEST_TOKEN" \
-                "${ACTIONS_ID_TOKEN_REQUEST_URL}&audience=api%3A%2F%2FAzureADTokenExchange" \
-                | python3 -c 'import json,sys; print(json.load(sys.stdin)["value"])')" \
-              --output none; then
+          az login \
+            --service-principal \
+            --username "$AZURE_CLIENT_ID" \
+            --tenant "$AZURE_TENANT_ID" \
+            --federated-token "$TOKEN" \
+            --allow-no-subscriptions \
+            --output none
 
-              if az account set --subscription "$AZURE_SUBSCRIPTION_ID"; then
-                az account show \
-                  --query "{name:name,subscriptionId:id,tenantId:tenantId}" \
-                  --output json
+          unset TOKEN
 
-                exit 0
-              fi
-            fi
+          echo "Checking direct access to the subscription..."
 
-            echo "Login or subscription selection failed."
+          ARM_TOKEN="$(az account get-access-token \
+            --tenant "$AZURE_TENANT_ID" \
+            --resource https://management.azure.com/ \
+            --query accessToken -o tsv)"
 
-            if [ "$attempt" -lt 3 ]; then
-              sleep 10
-            fi
-          done
+          HTTP_STATUS="$(curl -sS \
+            -o /tmp/subscription-response.json \
+            -w '%{http_code}' \
+            -H "Authorization: Bearer $ARM_TOKEN" \
+            "https://management.azure.com/subscriptions/$AZURE_SUBSCRIPTION_ID?api-version=2022-12-01")"
 
-          echo "ERROR: Azure login failed after 3 attempts."
-          exit 1
+          unset ARM_TOKEN
+
+          echo "Subscription API HTTP status: $HTTP_STATUS"
+
+          if [ "$HTTP_STATUS" = "200" ]; then
+            python3 -c \
+              'import json; d=json.load(open("/tmp/subscription-response.json")); print(json.dumps({"subscriptionId":d.get("subscriptionId"),"displayName":d.get("displayName"),"state":d.get("state")}, indent=2))'
+          else
+            cat /tmp/subscription-response.json
+            exit 1
+          fi
 
       # Authenticate Docker to Azure Container Registry.
       - name: Login to ACR
@@ -97,7 +106,7 @@ jobs:
           set -e
           az acr login --name "$ACR_NAME"
 
-      # Build the image.
+      # Build the Docker image.
       - name: Build Docker image
         env:
           ACR_LOGIN_SERVER: ${{ secrets.ACR_LOGIN_SERVER }}
@@ -113,7 +122,7 @@ jobs:
 
           echo "IMAGE=$IMAGE" >> "$GITHUB_ENV"
 
-      # Push the image.
+      # Push the Docker image.
       - name: Push Docker image
         shell: bash
         run: |
@@ -124,7 +133,6 @@ jobs:
 
           echo "Successfully pushed: $IMAGE"
 
-      # Display the published image reference.
       - name: Show published image
         shell: bash
         run: |
