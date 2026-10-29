@@ -16,11 +16,9 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
-      # 1. Download repository code
       - name: Checkout repository
         uses: actions/checkout@v4
 
-      # 2. Validate required GitHub secrets
       - name: Validate Azure configuration
         env:
           AZURE_CLIENT_ID: ${{ secrets.AZURE_CLIENT_ID }}
@@ -45,27 +43,51 @@ jobs:
             fi
           done
 
-          echo "Required configuration values are present."
+          echo "All required secrets are configured."
 
-      # 3. Authenticate to Azure using GitHub OIDC
+      # Login without requiring subscription discovery to succeed.
       - name: Login to Azure
         uses: azure/login@v2
         with:
           client-id: ${{ secrets.AZURE_CLIENT_ID }}
           tenant-id: ${{ secrets.AZURE_TENANT_ID }}
-          subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+          allow-no-subscriptions: true
 
-      # 4. Confirm the authenticated subscription
-      - name: Verify Azure subscription
+      # Retry subscription discovery and selection.
+      - name: Discover and select Azure subscription
+        env:
+          AZURE_SUBSCRIPTION_ID: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
         shell: bash
         run: |
           set -e
 
-          az account show \
-            --query "{name:name,subscriptionId:id,tenantId:tenantId}" \
-            --output json
+          for attempt in 1 2 3; do
+            echo "Subscription discovery attempt $attempt of 3"
 
-      # 5. Authenticate Docker to Azure Container Registry
+            az account list --all \
+              --query "[].{name:name,id:id,tenantId:tenantId,state:state}" \
+              --output table || true
+
+            if az account set --subscription "$AZURE_SUBSCRIPTION_ID"; then
+              echo "Azure subscription selected."
+
+              az account show \
+                --query "{name:name,subscriptionId:id,tenantId:tenantId}" \
+                --output json
+
+              exit 0
+            fi
+
+            if [ "$attempt" -lt 3 ]; then
+              sleep 5
+            fi
+          done
+
+          echo "ERROR: The service principal cannot select the subscription."
+          echo "Check subscription visibility for the authenticated Azure identity."
+          exit 1
+
+      # Authenticate Docker to ACR.
       - name: Login to ACR
         env:
           ACR_NAME: ${{ secrets.ACR_NAME }}
@@ -74,34 +96,24 @@ jobs:
           set -e
           az acr login --name "$ACR_NAME"
 
-      # 6. Build the Docker image
+      # Build the Docker image.
       - name: Build Docker image
         env:
           ACR_LOGIN_SERVER: ${{ secrets.ACR_LOGIN_SERVER }}
-          IMAGE_TAG: ${{ github.sha }}
         shell: bash
         run: |
           set -e
 
-          SHORT_SHA="${IMAGE_TAG:0:7}"
-          IMAGE="$ACR_LOGIN_SERVER/aks-demo-app:$SHORT_SHA"
+          IMAGE_TAG="${GITHUB_SHA:0:7}"
+          IMAGE="$ACR_LOGIN_SERVER/aks-demo-app:$IMAGE_TAG"
 
-          echo "Building image: $IMAGE"
           docker build -t "$IMAGE" .
-
           echo "IMAGE=$IMAGE" >> "$GITHUB_ENV"
 
-      # 7. Push the image to ACR
+      # Push the image to ACR.
       - name: Push Docker image
         shell: bash
         run: |
           set -e
-
-          echo "Pushing image: $IMAGE"
           docker push "$IMAGE"
-
-      # 8. Display the pushed image
-      - name: Show published image
-        run: |
-          echo "Successfully pushed:"
-          echo "$IMAGE"
+          echo "Successfully pushed: $IMAGE"
